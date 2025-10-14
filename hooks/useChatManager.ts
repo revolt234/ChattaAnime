@@ -5,9 +5,7 @@ import Tts from 'react-native-tts';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import { API_KEY } from '@env';
 import JsonFileReader from '../android/app/src/services/JsonFileReader';
-
-const genAI = new GoogleGenerativeAI(API_KEY);
-const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
+import GeminiService from '../android/app/src/services/GeminiService';
 
 export interface Message {
   role: 'user' | 'bot';
@@ -141,6 +139,7 @@ export const useChatManager = ({ isLiveMode, voiceEnabled }: ChatManagerProps) =
   const getBotResponse = async (currentUserMessage: Message, currentChat: Message[]) => {
     setLoading(true);
     try {
+        const model = GeminiService.getModel();
       const chatHistoryForAI = currentChat.map(msg => ({
         role: msg.role === 'user' ? 'user' : 'model',
         parts: [{ text: msg.message }],
@@ -220,6 +219,9 @@ export const useChatManager = ({ isLiveMode, voiceEnabled }: ChatManagerProps) =
      //...
       console.error('Errore durante la richiesta a Gemini:', err);
       const errorStartTime = Date.now() / 1000;
+       const errorMessage = err.message.includes('inizializzato')
+              ? 'Errore: La chiave API non è stata impostata.'
+              : 'Errore durante la richiesta.';
       setChat(prev => [...prev, { role: 'bot', message: 'Errore durante la richiesta.', start: errorStartTime, end: Date.now() / 1000 }]);
     } finally {
       setLoading(false);
@@ -249,6 +251,7 @@ export const useChatManager = ({ isLiveMode, voiceEnabled }: ChatManagerProps) =
     setLoading(true);
     setHasAskedForNameAndBirth(true);
     try {
+         const model = GeminiService.getModel();
       const prompt = 'Chiedi gentilmente nome e data di nascita, serve solo che fai questo senza confermare la comprensione di questa richiesta.';
       const hiddenMessage: Message = { role: 'user', message: 'INIZIO_INTERVISTA_NASCOSTO', start: 0, end: 0 };
       setChat([hiddenMessage]);
@@ -275,6 +278,9 @@ export const useChatManager = ({ isLiveMode, voiceEnabled }: ChatManagerProps) =
      } catch (err) {
       console.error('Errore durante la richiesta:', err);
       const errorStartTime = Date.now() / 1000;
+        const errorMessage = err.message.includes('inizializzato')
+              ? 'Errore: La chiave API non è stata impostata.'
+              : 'Errore durante la richiesta.';
       setChat([{ role: 'bot', message: 'Errore durante la richiesta.', start: errorStartTime, end: Date.now() / 1000 }]);
     } finally {
       setLoading(false);

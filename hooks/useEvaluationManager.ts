@@ -4,10 +4,7 @@ import { Alert } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import JsonFileReader from '../android/app/src/services/JsonFileReader';
 import { GoogleGenerativeAI } from '@google/generative-ai';
-import { API_KEY } from '@env';
-
-const genAI = new GoogleGenerativeAI(API_KEY);
-const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
+import GeminiService from '../android/app/src/services/GeminiService';
 
 export const useEvaluationManager = ({
   chat,
@@ -133,7 +130,8 @@ ${selectedProblem.modello_di_output}
 Conversazione completa:
 ${chat.map(m => `${m.role === 'user' ? 'PAZIENTE' : 'MEDICO'}: ${m.message}`).join('\n')}
 `;
-
+ // MODIFICATO: Otteniamo il modello dal servizio
+      const model = GeminiService.getModel();
       // Chiamata al modello
       const result = await model.generateContent(prompt);
       const response = await result.response;
@@ -178,6 +176,9 @@ ${chat.map(m => `${m.role === 'user' ? 'PAZIENTE' : 'MEDICO'}: ${m.message}`).jo
       setChat(prev => [...prev, { role: 'bot', message: `**${selectedProblem.fenomeno}**\n${text}` }]);
     } catch (err) {
       console.error('Errore durante la valutazione:', err);
+       const errorMessage = err.message.includes('inizializzato')
+              ? 'Valutazione fallita. Hai impostato la chiave API?'
+              : 'Valutazione fallita.';
       Alert.alert('Errore', 'Valutazione fallita.');
     } finally {
       setEvaluating(false);
@@ -218,9 +219,8 @@ const handleEvaluateProblems = useCallback(async (liveMetrics = null) => { // âœ
 
       const problemDetails = await JsonFileReader.getProblemDetails();
       const evaluations: Array<{ problem: string; evaluation: string }> = [];
-
       const newCurrentScores: { [fenomeno: string]: number } = {};
-
+      const model = GeminiService.getModel();
       for (const problem of problemDetails) {
          const { timeHint, logorreaHint, speechRateHint } = getHintsForProblem(problem, metrics);
 
@@ -281,6 +281,9 @@ ${chat.map(m => `${m.role === 'user' ? 'PAZIENTE' : 'MEDICO'}: ${m.message}`).jo
       setChat(prev => [...prev, { role: 'bot', message: formatted }]);
     } catch (err) {
       console.error('Errore nella generazione del report:', err);
+        const errorMessage = err.message.includes('inizializzato')
+              ? 'Report fallito. Hai impostato la chiave API?'
+              : 'Errore nella generazione del report.';
       Alert.alert('Errore', 'Errore nella generazione del report.');
     } finally {
       setEvaluating(false);

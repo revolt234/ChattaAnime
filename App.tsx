@@ -13,7 +13,8 @@ import {
   ActivityIndicator,
   TouchableOpacity,
   Modal,
-    LogBox, // <-- AGGIUNGI QUESTA RIGA
+    LogBox,
+    TextInput, // NUOVO// <-- AGGIUNGI QUESTA RIGA
 } from 'react-native';
 import LiveIndicator from './components/LiveIndicator';
 import { useUIManager } from './hooks/useUIManager'; // <-- AGGIUNGI
@@ -33,7 +34,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import JsonFileReader from './android/app/src/services/JsonFileReader';
 import Tts from 'react-native-tts';
 import { useChatManager } from './hooks/useChatManager'; // 👈 nuovo import
-
+import GeminiService from './android/app/src/services/GeminiService';
 LogBox.ignoreLogs([
   'new NativeEventEmitter', // Questo ignorerà tutti gli avvisi che iniziano con "new NativeEventEmitter"
 ]);
@@ -61,14 +62,17 @@ interface Chat {
 
 export default function App() {
     const { uiState, uiActions } = useUIManager();
-      const [voiceEnabled, setVoiceEnabled] = useState(false);
+    const [voiceEnabled, setVoiceEnabled] = useState(false);
     const [isLiveMode, setIsLiveMode] = useState(false); // <-- AGGIUNGI SE MANCA
     const [hasConcludedInterview, setHasConcludedInterview] = useState(false);
     const [isBotSpeaking, setIsBotSpeaking] = useState(false);
-      const [problemOptions, setProblemOptions] = useState<any[]>([]);
-      const [interviewTrigger, setInterviewTrigger] = useState<'live' | null>(null);
-           const chartsRef = useRef<ChartsReportExportHandles>(null);
-                const [scrollViewKey, setScrollViewKey] = useState(0);
+    const [problemOptions, setProblemOptions] = useState<any[]>([]);
+    const [interviewTrigger, setInterviewTrigger] = useState<'live' | null>(null);
+    const chartsRef = useRef<ChartsReportExportHandles>(null);
+    const [scrollViewKey, setScrollViewKey] = useState(0);
+    const [isApiKeyModalVisible, setIsApiKeyModalVisible] = useState(false);
+    const [apiKeyInput, setApiKeyInput] = useState('');
+    const [isApiKeySet, setIsApiKeySet] = useState(false);
   const {
       chat, setChat,
       loading, setLoading,
@@ -150,6 +154,21 @@ const deactivateLiveMode = () => {
 // SOSTITUISCI IL VECCHIO useEffect che gestisce la voce CON QUESTO:
 // useEffect in App.tsx (VERSIONE CORRETTA)
 
+ useEffect(() => {
+      const loadApiKey = async () => {
+        try {
+          const storedKey = await AsyncStorage.getItem('geminiApiKey');
+          if (storedKey) {
+            GeminiService.initialize(storedKey);
+            setApiKeyInput(storedKey); // Pre-compila l'input per future modifiche
+            setIsApiKeySet(GeminiService.isInitialized());
+          }
+        } catch (error) {
+          console.error("Impossibile caricare la chiave API:", error);
+        }
+      };
+      loadApiKey();
+    }, []);
 useEffect(() => {
   // Questo effetto si attiva SOLO quando l'hook ci dice che ha finito.
   if (voiceManager.hasFinishedSpeaking && isLiveMode && !hasConcludedInterview) {
@@ -252,6 +271,26 @@ useEffect(() => {
     setVoiceEnabled(!voiceEnabled);
   };
 
+ const handleSaveApiKey = async () => {
+      if (!apiKeyInput.trim()) {
+        Alert.alert('Attenzione', 'La chiave API non può essere vuota.');
+        return;
+      }
+      try {
+        await AsyncStorage.setItem('geminiApiKey', apiKeyInput);
+        GeminiService.initialize(apiKeyInput);
+        setIsApiKeySet(GeminiService.isInitialized());
+        setIsApiKeyModalVisible(false); // Chiude il modale
+        if (GeminiService.isInitialized()) {
+            Alert.alert('Successo', 'Chiave API salvata e inizializzata correttamente.');
+        } else {
+            Alert.alert('Errore', 'La chiave API fornita non è valida. Riprova.');
+        }
+      } catch (error) {
+        console.error("Impossibile salvare la chiave API:", error);
+        Alert.alert('Errore', 'Non è stato possibile salvare la chiave API.');
+      }
+    };
 
 // Sostituisci la vecchia toggleLiveListening con questa
 // Sostituisci 'handleConcludeLiveInterview' con questa funzione
@@ -395,24 +434,47 @@ const handleGoHome = () => {
         {uiState.isFirstLoad && chat.length === 0 ? (
           // --- SCHERMATA INIZIALE ---
           <View style={styles.startInterviewContainer}>
-
-
             <TouchableOpacity
-              style={[styles.startInterviewButton, { marginTop: 15, backgroundColor: '#FFC107' }]}
+              style={[styles.startInterviewButton, { backgroundColor: '#607D8B', marginBottom: 25 }]}
+              onPress={() => setIsApiKeyModalVisible(true)}
+            >
+              <Text style={styles.startInterviewButtonText}>🔑 Imposta API Key</Text>
+            </TouchableOpacity>
+
+            {/* Pulsanti disabilitati se la chiave non è impostata */}
+            <TouchableOpacity
+              style={[
+                styles.startInterviewButton,
+                { marginTop: 15, backgroundColor: '#FFC107' },
+                !isApiKeySet && styles.disabledButton
+              ]}
               onPress={handleImportTranscript}
+              disabled={!isApiKeySet}
             >
               <Text style={styles.startInterviewButtonText}>Valuta Intervista (JSON)</Text>
             </TouchableOpacity>
 
             <TouchableOpacity
-              style={[styles.startInterviewButton, { marginTop: 15, backgroundColor: '#4CAF50' }]}
+              style={[
+                styles.startInterviewButton,
+                { marginTop: 15, backgroundColor: '#4CAF50' },
+                !isApiKeySet && styles.disabledButton
+              ]}
               onPress={() => setInterviewTrigger('live')}
+              disabled={!isApiKeySet}
             >
               <Text style={styles.startInterviewButtonText}>🎙️ Intervista Live</Text>
             </TouchableOpacity>
+
+            {/* Messaggio di avviso se la chiave non è impostata */}
+            {!isApiKeySet && (
+              <Text style={styles.apiKeyWarning}>
+                Per favore, imposta la tua chiave API di Gemini per continuare.
+              </Text>
+            )}
           </View>
         ) : (
-
+          // --- SCHERMATA CHAT ---
           <>
             <ChatMessages
               chat={chat}
@@ -429,44 +491,9 @@ const handleGoHome = () => {
               />
             )}
 
-
             <View style={styles.bottomBar}>
               {(() => {
-                // CASO 1: Modalità non live.
-               // In App.tsx -> return() -> dentro il blocco {(() => { ... })()}
-
-                               // CASO 1: Modalità non live.
-                               if (!isLiveMode) {
-                                 return (
-                                   // Rimuoviamo ChatInput e lasciamo solo i pulsanti di azione
-                                   <View style={styles.actionButtons}>
-                                     <View style={[{ flex: 1 }]}>
-                                       <Button
-                                         title="🔧 Strumenti"
-                                         title="🔧 Strumenti"
-                                         onPress={handleOpenToolsMenu}
-                                         disabled={loading || evaluating || chat.length === 0}
-                                         color="#673AB7"
-                                       />
-                                     </View>
-                                   </View>
-                                 );
-                               }
-
-                // CASO 2: Modalità live e l'intervista è IN CORSO.
-                if (isLiveMode && !hasConcludedInterview) {
-                  return (
-                    <TouchableOpacity
-                      style={[styles.startInterviewButton, { backgroundColor: '#f44336', width: '95%', alignSelf: 'center', marginBottom: 10 }]}
-                      onPress={handleConcludeLiveInterview}
-                    >
-                      <Text style={styles.startInterviewButtonText}>Concludi Intervista</Text>
-                    </TouchableOpacity>
-                  );
-                }
-
-                // CASO 3: Modalità live ma l'intervista è stata CONCLUSA.
-                if (isLiveMode && hasConcludedInterview) {
+                if (!isLiveMode) {
                   return (
                     <View style={styles.actionButtons}>
                       <View style={[{ flex: 1 }]}>
@@ -481,7 +508,31 @@ const handleGoHome = () => {
                   );
                 }
 
-                // Fallback di sicurezza.
+                if (isLiveMode && !hasConcludedInterview) {
+                  return (
+                    <TouchableOpacity
+                      style={[styles.startInterviewButton, { backgroundColor: '#f44336', width: '95%', alignSelf: 'center', marginBottom: 10 }]}
+                      onPress={handleConcludeLiveInterview}
+                    >
+                      <Text style={styles.startInterviewButtonText}>Concludi Intervista</Text>
+                    </TouchableOpacity>
+                  );
+                }
+
+                if (isLiveMode && hasConcludedInterview) {
+                  return (
+                    <View style={styles.actionButtons}>
+                      <View style={[{ flex: 1 }]}>
+                        <Button
+                          title="🔧 Strumenti"
+                          onPress={handleOpenToolsMenu}
+                          disabled={loading || evaluating || chat.length === 0}
+                          color="#673AB7"
+                        />
+                      </View>
+                    </View>
+                  );
+                }
                 return null;
               })()}
             </View>
@@ -489,6 +540,7 @@ const handleGoHome = () => {
         )}
       </View>
 
+      {/* TUTTI I MODALI DEVONO ESSERE QUI, FUORI DAL CONTAINER DELLA CHAT */}
       <ToolsMenuModal
         visible={uiState.isToolsMenuVisible}
         onClose={uiActions.closeToolsMenu}
@@ -515,51 +567,45 @@ const handleGoHome = () => {
         onSave={(fileName) => exportChatToFile(chat, fileName)}
       />
 
-    {/* --- MODALE DEI GRAFICI CON LOGICA A RITARDO --- */}
-          <Modal
-            animationType="slide"
-            transparent={false}
-            visible={uiState.showChartsModal}
-            onRequestClose={uiActions.closeChartsModal}
-            // Quando la modale si apre, avviamo il timer per forzare il re-render
-            onShow={() => {
-              setTimeout(() => {
-                setScrollViewKey(prevKey => prevKey + 1);
-              }, 2000); // 2 secondi di ritardo
-            }}
+      <Modal
+        animationType="slide"
+        transparent={false}
+        visible={uiState.showChartsModal}
+        onRequestClose={uiActions.closeChartsModal}
+        onShow={() => {
+          setTimeout(() => {
+            setScrollViewKey(prevKey => prevKey + 1);
+          }, 2000);
+        }}
+      >
+        <SafeAreaView style={styles.modalContainer}>
+          <View style={styles.modalHeader}>
+            <Text style={styles.modalTitle}>Report Grafici</Text>
+            <TouchableOpacity onPress={uiActions.closeChartsModal}>
+              <Text style={styles.closeButton}>✕</Text>
+            </TouchableOpacity>
+          </View>
+          <View style={styles.exportButtonContainer}>
+            <Button
+              title="Esporta Immagine Grafici"
+              onPress={handleTriggerChartExport}
+            />
+          </View>
+          <ScrollView
+            key={scrollViewKey}
+            style={styles.modalContent}
           >
-            <SafeAreaView style={styles.modalContainer}>
-              <View style={styles.modalHeader}>
-                <Text style={styles.modalTitle}>Report Grafici</Text>
-                <TouchableOpacity onPress={uiActions.closeChartsModal}>
-                  <Text style={styles.closeButton}>✕</Text>
-                </TouchableOpacity>
-              </View>
-
-              <View style={styles.exportButtonContainer}>
-                <Button
-                  title="Esporta Immagine Grafici"
-                  onPress={handleTriggerChartExport}
-                />
-              </View>
-
-              {/* La chiave forza il re-render della ScrollView dopo il ritardo */}
-              <ScrollView
-                key={scrollViewKey}
-                style={styles.modalContent}
-              >
-                <ChartsReportExport
-                  ref={chartsRef}
-                  problems={problemOptions}
-                  evaluationLog={
-                    chatHistory.find((c) => c.id === currentChatId)?.evaluationLog
-                  }
-                  onSaved={uiActions.closeChartsModal}
-                  // La prop onLayoutReady è stata rimossa
-                />
-              </ScrollView>
-            </SafeAreaView>
-          </Modal>
+            <ChartsReportExport
+              ref={chartsRef}
+              problems={problemOptions}
+              evaluationLog={
+                chatHistory.find((c) => c.id === currentChatId)?.evaluationLog
+              }
+              onSaved={uiActions.closeChartsModal}
+            />
+          </ScrollView>
+        </SafeAreaView>
+      </Modal>
 
       <Modal transparent={true} visible={evaluating || exporting}>
         <View style={styles.loadingModal}>
@@ -568,6 +614,41 @@ const handleGoHome = () => {
             <Text style={styles.loadingText}>
               {exporting ? "Esportazione in corso..." : "Generazione del report in corso..."}
             </Text>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Modale per la chiave API */}
+      <Modal
+        visible={isApiKeyModalVisible}
+        transparent={true}
+        animationType="fade"
+        onRequestClose={() => setIsApiKeyModalVisible(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.apiKeyModalContainer}>
+            <Text style={styles.modalTitle}>Inserisci la tua API Key Gemini</Text>
+            <TextInput
+              style={styles.fileNameInput}
+              placeholder="La tua API Key..."
+              value={apiKeyInput}
+              onChangeText={setApiKeyInput}
+              secureTextEntry={true}
+            />
+            <View style={styles.modalButtons}>
+              <TouchableOpacity
+                style={[styles.modalButton, styles.cancelButton]}
+                onPress={() => setIsApiKeyModalVisible(false)}
+              >
+                <Text>Annulla</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.modalButton, styles.saveButton]}
+                onPress={handleSaveApiKey}
+              >
+                <Text style={styles.buttonText}>Salva Chiave</Text>
+              </TouchableOpacity>
+            </View>
           </View>
         </View>
       </Modal>
@@ -762,6 +843,7 @@ modalContent: {
     borderRadius: 5,
     padding: 10,
     marginBottom: 15,
+    color: '#000', // <-- AGGIUNGI QUESTA RIGA
   },
   modalButtons: {
     flexDirection: 'row',
@@ -799,4 +881,37 @@ modalContent: {
     fontWeight: 'bold',
   },
 
+disabledButton: {
+    backgroundColor: '#BDBDBD', // Grigio per indicare che è disabilitato
+    opacity: 0.7,
+  },
+  apiKeyWarning: {
+    marginTop: 20,
+    fontSize: 14,
+    color: '#D32F2F', // Rosso per l'avviso
+    textAlign: 'center',
+    paddingHorizontal: 20,
+  },
+  apiKeyModalContainer: {
+    backgroundColor: 'white',
+    padding: 25,
+    borderRadius: 15,
+    width: '90%',
+    alignSelf: 'center',
+    elevation: 5,
+  },
+  // Riusiamo lo stile modalOverlay che hai già
+  modalOverlay: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0,0,0,0.6)',
+  },
+  modalTitle: {
+    fontSize: 18,
+    fontWeight: 'bold',
+    color: '#000',
+    marginBottom: 15,
+    textAlign: 'center'
+  },
 });
