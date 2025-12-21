@@ -13,10 +13,11 @@ import {
   Alert,
   TouchableOpacity,
   Modal,
-  FlatList, // Aggiunto per la lista dei personaggi
+  FlatList,
+   Dimensions// Aggiunto per la lista dei personaggi
 } from 'react-native';
 
-import { GoogleGenerativeAI } from '@google/generative-ai';
+import { GoogleGenerativeAI, ChatSession } from '@google/generative-ai';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 type Message = {
@@ -25,19 +26,29 @@ type Message = {
   // 💡 Aggiunto per identificare il messaggio "sta scrivendo..."
   temporary?: boolean;
 };
-
-type Screen = 'home' | 'chat' | 'selectCharacter';
+type SavedChat = {
+  id: string;
+  characterName: string;
+  date: string;
+  preview: string;
+  messages: Message[];
+};
+type Screen = 'home' | 'chat' | 'selectCharacter' | 'reviewHistory';
 
 // 🤖 MODELLO GEMINI DA UTILIZZARE
 const GEMINI_MODEL = 'gemini-2.5-flash';
 
 export default function App() {
+    const [currentCharacter, setCurrentCharacter] = useState<Transcript | null>(null);
+      const [savedChats, setSavedChats] = useState<SavedChat[]>([]);
+      const [isHistorySidebarVisible, setIsHistorySidebarVisible] = useState(false);
+      const [selectedHistoryChat, setSelectedHistoryChat] = useState<SavedChat | null>(null);
   const [screen, setScreen] = useState<Screen>('home');
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [sending, setSending] = useState(false);
-  const [model, setModel] = useState<any>(null);
+  const [model, setModel] = useState<ChatSession | null>(null);
   const [testingKey, setTestingKey] = useState(false);
 
   // 🎭 STATO PER I PERSONAGGI
@@ -49,6 +60,15 @@ export default function App() {
   const [storedApiKey, setStoredApiKey] = useState<string | null>(null);
 
   // 🔹 Caricamento iniziale della Key e dei Personaggi
+  useEffect(() => {
+      const loadHistory = async () => {
+        try {
+          const jsonValue = await AsyncStorage.getItem('chatHistory');
+          if (jsonValue != null) setSavedChats(JSON.parse(jsonValue));
+        } catch (e) { console.error(e); }
+      };
+      loadHistory();
+    }, []);
   useEffect(() => {
     const loadData = async () => {
       // 1. Carica la Chiave API
@@ -73,7 +93,28 @@ export default function App() {
     };
     loadData();
   }, []);
+const saveChatToHistory = async () => {
+    if (messages.length === 0 || !currentCharacter) return;
 
+    const newChat: SavedChat = {
+      id: Date.now().toString(),
+      characterName: currentCharacter.Personaggio,
+      date: new Date().toLocaleString(),
+      preview: messages[messages.length - 1].text.substring(0, 30) + '...',
+      messages: messages,
+    };
+
+    const updatedHistory = [newChat, ...savedChats];
+    setSavedChats(updatedHistory);
+    await AsyncStorage.setItem('chatHistory', JSON.stringify(updatedHistory));
+  };
+
+  // 🔹 Elimina una chat dalla cronologia
+  const deleteHistoryItem = async (id: string) => {
+    const updatedHistory = savedChats.filter(chat => chat.id !== id);
+    setSavedChats(updatedHistory);
+    await AsyncStorage.setItem('chatHistory', JSON.stringify(updatedHistory));
+  };
   // 🔹 Salvataggio API Key (omesso per brevità, resta invariato)
   const handleSaveApiKey = async () => {
     if (!apiKeyInput.trim()) {
@@ -138,6 +179,7 @@ export default function App() {
 
   // 🔹 Avvio chat con un personaggio specifico
   const startChat = async (transcript: Transcript) => {
+          setCurrentCharacter(transcript); // <--- AGGIUNGI QUESTA RIGA
     if (!storedApiKey) {
       Alert.alert("Errore", "Chiave API mancante.");
       return;
@@ -146,33 +188,41 @@ export default function App() {
     setLoading(true);
 
     try {
-      setScreen('chat'); // Cambia subito a chat per mostrare il caricamento
+      setScreen('chat');
 
       const systemPrompt = buildSystemPrompt(transcript);
 
       const genAI = new GoogleGenerativeAI(storedApiKey);
-      const chatModel = genAI.getGenerativeModel({
+
+      // 1. Istanzia il modello con le istruzioni di sistema
+      const modelInstance = genAI.getGenerativeModel({
         model: GEMINI_MODEL,
         systemInstruction: systemPrompt,
       });
 
-      setModel(chatModel);
+      // 2. AVVIA LA SESSIONE DI CHAT (Questa è la parte fondamentale!)
+      const chatSession = modelInstance.startChat({
+        history: [], // La storia inizia vuota, si riempirà man mano
+      });
 
-      // Usa initialMessage se presente, altrimenti genera un messaggio di benvenuto standard.
+      // 3. Salviamo la SESSIONE, non il modello generico
+      setModel(chatSession);
+
+      // Usa initialMessage se presente
       const initialMessageText =
-          (transcript.initialMessage && typeof transcript.initialMessage === 'string')
-          ? transcript.initialMessage
-          : `Ciao! Sono pronto per l'intervista. Cominciamo! (Sto impersonando ${transcript.Personaggio})`;
+        (transcript.initialMessage && typeof transcript.initialMessage === 'string')
+        ? transcript.initialMessage
+        : `Ciao! Sono pronto per l'intervista. Cominciamo! (Sto impersonando ${transcript.Personaggio})`;
 
+      // Aggiorna solo la UI locale (React)
       setMessages([{ role: 'bot', text: initialMessageText }]);
-
 
     } catch (error) {
       console.error("ERRORE START CHAT:", error);
-      setScreen('home'); // Torna alla home in caso di fallimento
+      setScreen('home');
       Alert.alert(
         'Errore di Caricamento Chat',
-        `Impossibile avviare la chat per ${transcript.Personaggio}. Dettagli: ${error instanceof Error ? error.message : 'Errore sconosciuto.'}`
+        `Impossibile avviare la chat. Dettagli: ${error instanceof Error ? error.message : 'Errore sconosciuto.'}`
       );
     } finally {
       setLoading(false);
@@ -195,22 +245,29 @@ export default function App() {
 
   // 🔹 Funzione per tornare alla Home (Resetta la chat)
   const handleGoHome = () => {
-    Alert.alert(
-      "Torna alla Home",
-      "Sei sicuro? La conversazione attuale andrà persa.",
-      [
-        { text: "Annulla", style: "cancel" },
-        {
-          text: "Sì, esci",
-          onPress: () => {
-            setMessages([]);
-            setInput('');
-            setScreen('home');
+      Alert.alert(
+        "Chiudi Chat",
+        "Vuoi salvare questa conversazione nella cronologia?",
+        [
+          {
+            text: "No, Esci",
+            style: "destructive",
+            onPress: () => {
+              setMessages([]);
+              setScreen('home');
+            }
+          },
+          {
+            text: "Sì, Salva ed Esci",
+            onPress: async () => {
+              await saveChatToHistory();
+              setMessages([]);
+              setScreen('home');
+            }
           }
-        }
-      ]
-    );
-  };
+        ]
+      );
+    };
 
   // 🔹 Costruzione prompt - Usa 'guida' come prompt di sistema
   const buildSystemPrompt = (transcript: Transcript): string => {
@@ -222,50 +279,38 @@ export default function App() {
   };
 
   // 🔹 Invio messaggio (Invariato)
+// 🔹 Invio messaggio
 const sendMessage = async () => {
-  if (!input.trim() || !model) return;
+  if (!input.trim() || !model) return; // 'model' qui è in realtà la chatSession
 
   const userText = input.trim();
   setInput('');
   setSending(true);
 
-  // 1. Aggiunge il messaggio utente alla cronologia
+  // UI Update: Utente
   setMessages(prev => [...prev, { role: 'user', text: userText }]);
-
-  // 2. 💡 Aggiunge il messaggio temporaneo "..." per indicare che il bot sta scrivendo
+  // UI Update: Bot sta scrivendo...
   setMessages(prev => [...prev, { role: 'bot', text: 'sta scrivendo...', temporary: true }]);
 
-
   try {
-    const result = await model.generateContent(userText);
+    // 🔴 CAMBIAMENTO QUI: Usa .sendMessage() invece di .generateContent()
+    // Questo metodo invia il messaggio E mantiene la storia della conversazione.
+    const result = await model.sendMessage(userText);
+
     const reply = result.response.text();
 
     if (typeof reply === 'string' && reply.trim().length > 0) {
-
-      // 3. 💡 Rimuove il messaggio temporaneo e aggiunge la risposta finale
       setMessages(prev => {
-        // Filtra via l'ultimo messaggio (che è "...")
         const updatedMessages = prev.filter(msg => !msg.temporary);
         return [...updatedMessages, { role: 'bot', text: reply }];
       });
-
     } else {
-      // Se la risposta non è valida, rimuoviamo solo il messaggio temporaneo
       setMessages(prev => prev.filter(msg => !msg.temporary));
-
-      // 🕵️ DEBUG: Logga l'intera risposta se il testo è mancante/vuoto
-      console.error(
-        'Risposta del modello non valida o vuota:',
-        JSON.stringify(result.response, null, 2)
-      );
-
       Alert.alert('Errore', 'Il chatbot non ha fornito una risposta valida.');
     }
 
   } catch (error) {
-    // In caso di errore, rimuoviamo il messaggio temporaneo
     setMessages(prev => prev.filter(msg => !msg.temporary));
-
     console.error(error);
     Alert.alert('Errore', 'Errore nella risposta del chatbot.');
   } finally {
@@ -275,37 +320,40 @@ const sendMessage = async () => {
 
   // 🔹 HOME SCREEN
   if (screen === 'home') {
-    const isActionDisabled = loading || testingKey;
+      const isActionDisabled = loading || testingKey;
 
-    return (
-      <SafeAreaView style={styles.container}>
-        <View style={styles.centered}>
-          <Text style={styles.title}>IntervistAI</Text>
+      return (
+        <SafeAreaView style={styles.container}>
+          <View style={styles.centered}>
+            <Text style={styles.title}>IntervistAI</Text>
 
-          {storedApiKey ? (
-            <Text style={styles.keyStatusText}>
-              Chiave API salvata: **{storedApiKey.substring(0, 5)}...**
-            </Text>
-          ) : (
-            <Text style={styles.keyStatusTextMissing}>
-              Nessuna Chiave API salvata
-            </Text>
-          )}
+            {/* STATO API KEY */}
+            {storedApiKey ? (
+              <Text style={styles.keyStatusText}>
+                Chiave API salvata: **{storedApiKey.substring(0, 5)}...**
+              </Text>
+            ) : (
+              <Text style={styles.keyStatusTextMissing}>
+                Nessuna Chiave API salvata
+              </Text>
+            )}
 
-          <TouchableOpacity
-            style={[styles.button, styles.apiKeyButton]}
-            onPress={() => setIsApiKeyModalVisible(true)}
-            disabled={isActionDisabled}
-          >
-            <Text style={styles.buttonText}>🔑 Imposta/Modifica API Key</Text>
-          </TouchableOpacity>
+            {/* BOTTONE GESTIONE API KEY */}
+            <TouchableOpacity
+              style={[styles.button, styles.apiKeyButton]}
+              onPress={() => setIsApiKeyModalVisible(true)}
+              disabled={isActionDisabled}
+            >
+              <Text style={styles.buttonText}>🔑 Imposta/Modifica API Key</Text>
+            </TouchableOpacity>
 
-          {storedApiKey && (
-             <TouchableOpacity
+            {/* BOTTONE TEST API KEY */}
+            {storedApiKey && (
+              <TouchableOpacity
                 style={[
-                   styles.button,
-                   styles.testButton,
-                   isActionDisabled && styles.disabledButton
+                  styles.button,
+                  styles.testButton,
+                  isActionDisabled && styles.disabledButton
                 ]}
                 onPress={handleTestApiKey}
                 disabled={isActionDisabled}
@@ -315,67 +363,182 @@ const sendMessage = async () => {
                 ) : (
                   <Text style={styles.buttonText}>✅ Test API Key</Text>
                 )}
-             </TouchableOpacity>
-          )}
+              </TouchableOpacity>
+            )}
 
-          <TouchableOpacity
-            style={[
-              styles.button,
-              styles.startButton,
-              (!storedApiKey || isActionDisabled || characters.length === 0) && styles.disabledButton
-            ]}
-            onPress={handleStartInterviewClick} // Chiamata al gestore che apre la selezione
-            disabled={!storedApiKey || isActionDisabled || characters.length === 0}
-          >
-            <Text style={styles.buttonText}>Avvia intervista ({characters.length} Personaggi)</Text>
-          </TouchableOpacity>
+            {/* BOTTONE AVVIA INTERVISTA */}
+            <TouchableOpacity
+              style={[
+                styles.button,
+                styles.startButton,
+                (!storedApiKey || isActionDisabled || characters.length === 0) && styles.disabledButton
+              ]}
+              onPress={handleStartInterviewClick}
+              disabled={!storedApiKey || isActionDisabled || characters.length === 0}
+            >
+              <Text style={styles.buttonText}>Avvia intervista ({characters.length})</Text>
+            </TouchableOpacity>
 
-          {characters.length === 0 && (
-             <Text style={styles.warningText}>Caricamento personaggi fallito o lista vuota.</Text>
-          )}
+            {/* 🆕 NUOVO BOTTONE: CRONOLOGIA */}
+            <TouchableOpacity
+              style={[
+                styles.button,
+                { backgroundColor: '#FF9800', marginTop: 10 } // Arancione
+              ]}
+              onPress={() => setIsHistorySidebarVisible(true)}
+            >
+              <Text style={styles.buttonText}>📚 Cronologia Chat</Text>
+            </TouchableOpacity>
 
-          {loading && <ActivityIndicator size="large" color="#0000ff" style={{ marginTop: 20 }} />}
 
-          {/* MODALE API KEY (omesso per brevità, resta invariato) */}
-          <Modal
-            visible={isApiKeyModalVisible}
-            transparent={true}
-            animationType="fade"
-            onRequestClose={() => setIsApiKeyModalVisible(false)}
-          >
-            <View style={styles.modalOverlay}>
-              <View style={styles.apiKeyModalContainer}>
-                <Text style={styles.modalTitle}>Inserisci/Visualizza la tua API Key Gemini</Text>
-                <TextInput
-                  style={styles.modalInput}
-                  placeholder="La tua API Key..."
-                  placeholderTextColor="#999"
-                  value={apiKeyInput}
-                  onChangeText={setApiKeyInput}
-                  secureTextEntry={false}
-                />
-                <View style={styles.modalButtonsRow}>
-                  <TouchableOpacity
-                    style={[styles.modalButton, styles.cancelButton]}
-                    onPress={() => setIsApiKeyModalVisible(false)}
-                  >
-                    <Text style={styles.modalButtonTextBlack}>Annulla</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={[styles.modalButton, styles.saveButton]}
-                    onPress={handleSaveApiKey}
-                  >
-                    <Text style={styles.buttonText}>Salva Chiave</Text>
-                  </TouchableOpacity>
+            {/* Messaggi di errore o caricamento */}
+            {characters.length === 0 && (
+              <Text style={styles.warningText}>Caricamento personaggi fallito o lista vuota.</Text>
+            )}
+            {loading && <ActivityIndicator size="large" color="#0000ff" style={{ marginTop: 20 }} />}
+
+
+            {/* ---------------- MODALI ---------------- */}
+
+            {/* 1. MODALE API KEY (Quella originale) */}
+            <Modal
+              visible={isApiKeyModalVisible}
+              transparent={true}
+              animationType="fade"
+              onRequestClose={() => setIsApiKeyModalVisible(false)}
+            >
+              <View style={styles.modalOverlay}>
+                <View style={styles.apiKeyModalContainer}>
+                  <Text style={styles.modalTitle}>Inserisci/Visualizza la tua API Key Gemini</Text>
+                  <TextInput
+                    style={styles.modalInput}
+                    placeholder="La tua API Key..."
+                    placeholderTextColor="#999"
+                    value={apiKeyInput}
+                    onChangeText={setApiKeyInput}
+                    secureTextEntry={false}
+                  />
+                  <View style={styles.modalButtonsRow}>
+                    <TouchableOpacity
+                      style={[styles.modalButton, styles.cancelButton]}
+                      onPress={() => setIsApiKeyModalVisible(false)}
+                    >
+                      <Text style={styles.modalButtonTextBlack}>Annulla</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={[styles.modalButton, styles.saveButton]}
+                      onPress={handleSaveApiKey}
+                    >
+                      <Text style={styles.buttonText}>Salva Chiave</Text>
+                    </TouchableOpacity>
+                  </View>
                 </View>
               </View>
-            </View>
-          </Modal>
+            </Modal>
 
-        </View>
-      </SafeAreaView>
-    );
-  }
+            {/* 2. 🆕 MODALE SIDEBAR CRONOLOGIA (Nuova) */}
+            <Modal
+              animationType="fade"
+              transparent={true}
+              visible={isHistorySidebarVisible}
+              onRequestClose={() => setIsHistorySidebarVisible(false)}
+            >
+              <View style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', flexDirection: 'row' }}>
+                {/* Contenitore Bianco Laterale (Sidebar) - Larghezza 80% */}
+                <View style={{ width: '80%', height: '100%', backgroundColor: '#fff', padding: 20, elevation: 5 }}>
+
+                  <Text style={{ fontSize: 22, fontWeight: 'bold', marginBottom: 20, color: '#333' }}>
+                    🗄️ Le tue Chat
+                  </Text>
+
+                  {savedChats.length === 0 ? (
+                    <Text style={{ textAlign: 'center', marginTop: 20, color: '#666' }}>Nessuna chat salvata.</Text>
+                  ) : (
+                    <FlatList
+                      data={savedChats}
+                      keyExtractor={item => item.id}
+                      renderItem={({item}) => (
+                        <View style={{
+                          flexDirection: 'row',
+                          justifyContent: 'space-between',
+                          alignItems: 'center',
+                          paddingVertical: 15,
+                          borderBottomWidth: 1,
+                          borderColor: '#eee'
+                        }}>
+                          {/* Clicca sul testo per aprire la chat */}
+                          <TouchableOpacity
+                            style={{ flex: 1, marginRight: 10 }}
+                            onPress={() => {
+                              setSelectedHistoryChat(item);
+                              setIsHistorySidebarVisible(false); // Chiudi modale
+                              setScreen('reviewHistory');        // Vai alla schermata
+                            }}
+                          >
+                            <Text style={{ fontWeight: 'bold', fontSize: 16, color: '#000' }}>{item.characterName}</Text>
+                            <Text style={{ fontSize: 12, color: '#666', marginBottom: 4 }}>{item.date}</Text>
+                            <Text style={{ fontSize: 12, color: '#999', fontStyle: 'italic' }} numberOfLines={1}>
+                              {item.preview}
+                            </Text>
+                          </TouchableOpacity>
+
+                          {/* Clicca sul cestino per cancellare */}
+                          <TouchableOpacity onPress={() => deleteHistoryItem(item.id)} style={{ padding: 5 }}>
+                            <Text style={{ fontSize: 20 }}>🗑️</Text>
+                          </TouchableOpacity>
+                        </View>
+                      )}
+                    />
+                  )}
+
+                  <Button title="Chiudi Menu" onPress={() => setIsHistorySidebarVisible(false)} />
+                </View>
+
+                {/* Area trasparente a destra per chiudere cliccando fuori */}
+                <TouchableOpacity
+                  style={{ flex: 1 }}
+                  onPress={() => setIsHistorySidebarVisible(false)}
+                />
+              </View>
+            </Modal>
+
+          </View>
+        </SafeAreaView>
+      );
+    }
+
+    // 🔹 REVIEW HISTORY SCREEN (Solo lettura)
+    if (screen === 'reviewHistory' && selectedHistoryChat) {
+      return (
+        <SafeAreaView style={styles.container}>
+          {/* Header con sfondo diverso per far capire che è uno storico */}
+          <View style={[styles.header, { backgroundColor: '#FFF8E1' }]}>
+            <TouchableOpacity onPress={() => setScreen('home')} style={styles.headerButton}>
+              <Text style={styles.headerButtonText}>🏠 Home</Text>
+            </TouchableOpacity>
+            <Text style={styles.headerTitle}>Storico: {selectedHistoryChat.characterName}</Text>
+            <View style={{ width: 50 }} />
+          </View>
+
+          <ScrollView style={styles.chat} contentContainerStyle={{ padding: 16 }}>
+            {selectedHistoryChat.messages.map((msg, index) => (
+              <View
+                key={index}
+                style={[
+                  styles.message,
+                  msg.role === 'user' ? styles.user : styles.bot,
+                ]}
+              >
+                <Text style={styles.messageText}>{msg.text}</Text>
+              </View>
+            ))}
+            <Text style={{ textAlign: 'center', color: '#999', marginTop: 20, marginBottom: 40, fontStyle: 'italic' }}>
+              --- Fine della Cronologia ---
+            </Text>
+          </ScrollView>
+        </SafeAreaView>
+      );
+    }
 
   // 🔹 SELECT CHARACTER SCREEN
   if (screen === 'selectCharacter') {
