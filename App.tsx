@@ -1,3 +1,4 @@
+
 // App.tsx
 import JsonFileReader, { Transcript } from './android/app/src/services/JsonFileReader';
 import React, { useState, useEffect } from 'react';
@@ -50,7 +51,7 @@ export default function App() {
   const [sending, setSending] = useState(false);
   const [model, setModel] = useState<ChatSession | null>(null);
   const [testingKey, setTestingKey] = useState(false);
-
+const [currentChatId, setCurrentChatId] = useState<string | null>(null);
   // 🎭 STATO PER I PERSONAGGI
   const [characters, setCharacters] = useState<Transcript[]>([]);
 
@@ -96,24 +97,92 @@ export default function App() {
 const saveChatToHistory = async () => {
     if (messages.length === 0 || !currentCharacter) return;
 
-    const newChat: SavedChat = {
-      id: Date.now().toString(),
-      characterName: currentCharacter.Personaggio,
-      date: new Date().toLocaleString(),
-      preview: messages[messages.length - 1].text.substring(0, 30) + '...',
-      messages: messages,
-    };
+    const previewText = messages[messages.length - 1].text.substring(0, 30) + '...';
 
-    const updatedHistory = [newChat, ...savedChats];
-    setSavedChats(updatedHistory);
-    await AsyncStorage.setItem('chatHistory', JSON.stringify(updatedHistory));
+    // Se stiamo modificando una chat esistente (abbiamo un ID)
+    if (currentChatId) {
+      const updatedHistory = savedChats.map(chat => {
+        if (chat.id === currentChatId) {
+          return {
+            ...chat,
+            date: new Date().toLocaleString(), // Aggiorna la data all'ultima modifica
+            preview: previewText,
+            messages: messages
+          };
+        }
+        return chat;
+      });
+      setSavedChats(updatedHistory);
+      await AsyncStorage.setItem('chatHistory', JSON.stringify(updatedHistory));
+    }
+    else {
+      // È una chat nuova di zecca
+      const newId = Date.now().toString();
+      const newChat: SavedChat = {
+        id: newId,
+        characterName: currentCharacter.Personaggio,
+        date: new Date().toLocaleString(),
+        preview: previewText,
+        messages: messages,
+      };
+
+      const updatedHistory = [newChat, ...savedChats];
+      setSavedChats(updatedHistory);
+      await AsyncStorage.setItem('chatHistory', JSON.stringify(updatedHistory));
+      setCurrentChatId(newId); // Ora questa sessione ha un ID
+    }
   };
 
-  // 🔹 Elimina una chat dalla cronologia
   const deleteHistoryItem = async (id: string) => {
     const updatedHistory = savedChats.filter(chat => chat.id !== id);
     setSavedChats(updatedHistory);
     await AsyncStorage.setItem('chatHistory', JSON.stringify(updatedHistory));
+  };
+  const resumeChat = async (savedChat: SavedChat) => {
+    if (!storedApiKey) return;
+
+    const originalCharacter = characters.find(c => c.Personaggio === savedChat.characterName);
+    if (!originalCharacter) {
+      Alert.alert("Errore", "Personaggio non trovato.");
+      return;
+    }
+
+    setLoading(true);
+    setIsHistorySidebarVisible(false);
+
+    try {
+      const historyForSdk = savedChat.messages
+        .filter(msg => !msg.temporary)
+        .map(msg => ({
+          role: msg.role === 'user' ? 'user' : 'model',
+          parts: [{ text: msg.text }],
+        }));
+
+      const genAI = new GoogleGenerativeAI(storedApiKey);
+
+      const modelInstance = genAI.getGenerativeModel({
+        model: GEMINI_MODEL,
+        systemInstruction: buildSystemPrompt(originalCharacter),
+      });
+
+      // 💡 Usa .startChat()
+      const chatSession = modelInstance.startChat({
+        history: historyForSdk, // Inietta il contesto passato
+        generationConfig: { maxOutputTokens: 1000, temperature: 0.9 },
+      });
+
+      setModel(chatSession);
+      setMessages(savedChat.messages);
+      setCurrentCharacter(originalCharacter);
+      setCurrentChatId(savedChat.id);
+      setScreen('chat');
+
+    } catch (error) {
+      console.error("ERRORE RESUME:", error);
+      Alert.alert("Errore", "Impossibile riprendere la chat.");
+    } finally {
+      setLoading(false);
+    }
   };
   // 🔹 Salvataggio API Key (omesso per brevità, resta invariato)
   const handleSaveApiKey = async () => {
@@ -178,56 +247,45 @@ const saveChatToHistory = async () => {
 
 
   // 🔹 Avvio chat con un personaggio specifico
-  const startChat = async (transcript: Transcript) => {
-          setCurrentCharacter(transcript); // <--- AGGIUNGI QUESTA RIGA
-    if (!storedApiKey) {
-      Alert.alert("Errore", "Chiave API mancante.");
-      return;
-    }
+ const startNewChat = async (transcript: Transcript) => {
+   setCurrentCharacter(transcript);
+   setCurrentChatId(null);
 
-    setLoading(true);
+   if (!storedApiKey) {
+     Alert.alert("Errore", "Chiave API mancante.");
+     return;
+   }
 
-    try {
-      setScreen('chat');
+   setLoading(true);
+   try {
+     setScreen('chat');
+     const systemPrompt = buildSystemPrompt(transcript); // 💡 aggiunto buildSystemPrompt
+     const genAI = new GoogleGenerativeAI(storedApiKey);
 
-      const systemPrompt = buildSystemPrompt(transcript);
+     // Configurazione Modello
+     const modelInstance = genAI.getGenerativeModel({
+       model: GEMINI_MODEL,
+       systemInstruction: systemPrompt,
+     });
 
-      const genAI = new GoogleGenerativeAI(storedApiKey);
+     // 💡 Usa .startChat(), non .startNewChat()
+     const chatSession = modelInstance.startChat({
+       history: [],
+       generationConfig: { maxOutputTokens: 1000, temperature: 0.9 },
+     });
 
-      // 1. Istanzia il modello con le istruzioni di sistema
-      const modelInstance = genAI.getGenerativeModel({
-        model: GEMINI_MODEL,
-        systemInstruction: systemPrompt,
-      });
+     setModel(chatSession);
+     const initialMessageText = transcript.initialMessage || `Ciao, sono ${transcript.Personaggio}!`;
+     setMessages([{ role: 'bot', text: initialMessageText }]);
 
-      // 2. AVVIA LA SESSIONE DI CHAT (Questa è la parte fondamentale!)
-      const chatSession = modelInstance.startChat({
-        history: [], // La storia inizia vuota, si riempirà man mano
-      });
-
-      // 3. Salviamo la SESSIONE, non il modello generico
-      setModel(chatSession);
-
-      // Usa initialMessage se presente
-      const initialMessageText =
-        (transcript.initialMessage && typeof transcript.initialMessage === 'string')
-        ? transcript.initialMessage
-        : `Ciao! Sono pronto per l'intervista. Cominciamo! (Sto impersonando ${transcript.Personaggio})`;
-
-      // Aggiorna solo la UI locale (React)
-      setMessages([{ role: 'bot', text: initialMessageText }]);
-
-    } catch (error) {
-      console.error("ERRORE START CHAT:", error);
-      setScreen('home');
-      Alert.alert(
-        'Errore di Caricamento Chat',
-        `Impossibile avviare la chat. Dettagli: ${error instanceof Error ? error.message : 'Errore sconosciuto.'}`
-      );
-    } finally {
-      setLoading(false);
-    }
-  };
+   } catch (error) {
+     console.error("ERRORE START:", error);
+     setScreen('home');
+     Alert.alert('Errore', 'Impossibile avviare la chat.');
+   } finally {
+     setLoading(false);
+   }
+ };
 
   // 🔹 Gestisce il click sul pulsante "Avvia Intervista"
   const handleStartInterviewClick = () => {
@@ -469,11 +527,7 @@ const sendMessage = async () => {
                           {/* Clicca sul testo per aprire la chat */}
                           <TouchableOpacity
                             style={{ flex: 1, marginRight: 10 }}
-                            onPress={() => {
-                              setSelectedHistoryChat(item);
-                              setIsHistorySidebarVisible(false); // Chiudi modale
-                              setScreen('reviewHistory');        // Vai alla schermata
-                            }}
+                           onPress={() => resumeChat(item)}
                           >
                             <Text style={{ fontWeight: 'bold', fontSize: 16, color: '#000' }}>{item.characterName}</Text>
                             <Text style={{ fontSize: 12, color: '#666', marginBottom: 4 }}>{item.date}</Text>
@@ -559,7 +613,7 @@ const sendMessage = async () => {
           renderItem={({ item }) => (
             <TouchableOpacity
               style={styles.characterButton}
-              onPress={() => startChat(item)}
+              onPress={() => startNewChat(item)}
               disabled={loading}
             >
               <Text style={styles.characterButtonText}>{item.Personaggio}</Text>
